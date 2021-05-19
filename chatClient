@@ -1,8 +1,10 @@
 #include "framework.h"
-#include "ChatClient(1).h"
+#include "chatclient.h"
 
 #include <stdio.h>
-#include <winsock2.h>
+#include <WinSock2.h>
+#include <assert.h>
+#include <sstream>
 
 #pragma comment(lib, "ws2_32")
 #pragma warning(disable:4996)
@@ -16,13 +18,14 @@ WCHAR szTitle[MAX_LOADSTRING];                  // The title bar text
 WCHAR szWindowClass[MAX_LOADSTRING];            // the main window class name
 
 SOCKET client;
+int clients[64];
+int numClients = 0;
+
 // Forward declarations of functions included in this code module:
 ATOM                MyRegisterClass(HINSTANCE hInstance);
 BOOL                InitInstance(HINSTANCE, int);
 LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
-
-int startWith(const char* pre, const char* str);
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                      _In_opt_ HINSTANCE hPrevInstance,
@@ -47,7 +50,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
     // Initialize global strings
     LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
-    LoadStringW(hInstance, IDC_CHATCLIENT1, szWindowClass, MAX_LOADSTRING);
+    LoadStringW(hInstance, IDC_CHATCLIENT, szWindowClass, MAX_LOADSTRING);
     MyRegisterClass(hInstance);
 
     // Perform application initialization:
@@ -56,9 +59,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         return FALSE;
     }
 
-    
-
-    HACCEL hAccelTable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_CHATCLIENT1));
+    HACCEL hAccelTable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_CHATCLIENT));
 
     MSG msg;
 
@@ -93,10 +94,10 @@ ATOM MyRegisterClass(HINSTANCE hInstance)
     wcex.cbClsExtra     = 0;
     wcex.cbWndExtra     = 0;
     wcex.hInstance      = hInstance;
-    wcex.hIcon          = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_CHATCLIENT1));
+    wcex.hIcon          = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_CHATCLIENT));
     wcex.hCursor        = LoadCursor(nullptr, IDC_ARROW);
     wcex.hbrBackground  = (HBRUSH)(COLOR_WINDOW+1);
-    wcex.lpszMenuName   = MAKEINTRESOURCEW(IDC_CHATCLIENT1);
+    wcex.lpszMenuName   = MAKEINTRESOURCEW(IDC_CHATCLIENT);
     wcex.lpszClassName  = szWindowClass;
     wcex.hIconSm        = LoadIcon(wcex.hInstance, MAKEINTRESOURCE(IDI_SMALL));
 
@@ -125,9 +126,9 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
       return FALSE;
    }
 
-   WSAAsyncSelect(client, hWnd, WM_SOCKET, FD_READ);
+   WSAAsyncSelect(client, hWnd, WM_SOCKET, FD_READ | FD_CLOSE);
 
-   CreateWindowEx(WS_EX_CLIENTEDGE, TEXT("LISTBOX"), TEXT(""), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOVSCROLL, 
+   CreateWindowEx(WS_EX_CLIENTEDGE, TEXT("LISTBOX"), TEXT(""), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOVSCROLL,
        10, 10, 300, 300, hWnd, (HMENU)IDC_LIST_MESSAGES, GetModuleHandle(NULL), NULL);
 
    CreateWindowEx(WS_EX_CLIENTEDGE, TEXT("LISTBOX"), TEXT(""), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOVSCROLL,
@@ -138,8 +139,6 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
 
    CreateWindowEx(WS_EX_CLIENTEDGE, TEXT("BUTTON"), TEXT("Send"), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
        320, 310, 100, 30, hWnd, (HMENU)IDC_BUTTON_SEND, GetModuleHandle(NULL), NULL);
-
-
 
    ShowWindow(hWnd, nCmdShow);
    UpdateWindow(hWnd);
@@ -163,59 +162,147 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
     case WM_SOCKET:
     {
-
-        if (WSAGETSELECTEVENT(lParam) != FD_CLOSE)
+        if (WSAGETSELECTERROR(lParam))
         {
-            char buf[256], tmp[32];
-            int ret = recv(wParam, buf, sizeof(buf), 0);
-            buf[ret] = 0;
-            char sbuf[256];
-            sprintf(sbuf, "%d: %s\n", wParam, buf);
-            SendDlgItemMessageA(hWnd, IDC_LIST_MESSAGES, LB_ADDSTRING, 0, (LPARAM)buf);
-            }
-            
+            closesocket(wParam);
+            return TRUE;
         }
 
-        else  
+        if (WSAGETSELECTEVENT(lParam) == FD_READ)
         {
-            printf("Dong ket noi\n");
+            char buf[256], head[256], tail[256];
+            int ret = recv(wParam, buf, sizeof(buf), 0);
+
+            // Xu ly du lieu
+            buf[ret] = 0;
+            SendDlgItemMessageA(hWnd, IDC_LIST_MESSAGES, LB_ADDSTRING, 0, (LPARAM)buf);
+            sscanf(buf, "%s %s", head, tail);
+
+            if (strcmp(head, "online:") == 0) {
+
+                char** result = 0;
+                size_t count = 0;
+                char* tmp = buf;
+                char* last_comma = 0;
+                char delim[2];
+                delim[0] = ' ';
+                delim[1] = 0;
+
+                /* Count how many elements will be extracted. */
+                while (*tmp)
+                {
+                    if (' ' == *tmp)
+                    {
+                        count++;
+                        last_comma = tmp;
+                    }
+                    tmp++;
+                }
+
+                /* Add space for trailing token. */
+                count += last_comma < (buf + strlen(buf) - 1);
+
+                /* Add space for terminating null string so caller
+                   knows where the list of returned strings ends. */
+                count++;
+
+                result = (char**)malloc(sizeof(char*) * count);
+
+                if (result)
+                {
+                    size_t idx = 0;
+                    char* token = strtok(buf, delim);
+
+                    while (token)
+                    {
+                        assert(idx < count);
+                        *(result + idx++) = strdup(token);
+                        token = strtok(0, delim);
+                    }
+                    assert(idx == count - 1);
+                    *(result + idx) = 0;
+                }
+                char** tails = result;
+
+                if (tails)
+                {
+                    int i;
+                    for (i = 1; *(tails + i); i++)
+                    {
+                        if ((atoi(*(tails + i)) != 0)) {
+                            SendDlgItemMessageA(hWnd, IDC_LIST_CLIENTS, LB_ADDSTRING, 0, (LPARAM) * (tails + i));
+                            clients[i - 1] = atoi(*(tails + i));
+                            numClients++;
+                        }
+                        free(*(tails + i));
+                    }
+                    free(tails);
+                }
+
+            }
+
+            if (strcmp(head, "Co_ket_noi_moi:") == 0) {
+
+                SendDlgItemMessageA(hWnd, IDC_LIST_CLIENTS, LB_ADDSTRING, 0, (LPARAM)tail);
+                int ids = atoi(tail);
+                clients[numClients] = ids;
+                numClients++;
+            }
+        }
+
+        if (WSAGETSELECTEVENT(lParam) == FD_CLOSE)
+        {
+            char buf[256];
+            sprintf(buf, "Ket noi bi dong: %d", wParam);
+            SendDlgItemMessageA(hWnd, IDC_LIST_MESSAGES, LB_ADDSTRING, 0, (LPARAM)buf);
             closesocket(wParam);
         }
     }
+    break;
     case WM_COMMAND:
+    {
+        int wmId = LOWORD(wParam);
+        // Parse the menu selections:
+        switch (wmId)
         {
-            int wmId = LOWORD(wParam);
-            // Parse the menu selections:
-            switch (wmId)
-            {
-            case IDC_BUTTON_SEND:
-            {
-                char buf[256];
-                GetDlgItemTextA(hWnd, IDC_EDIT_MESSAGE, buf, sizeof(buf));
-                send(client, buf, strlen(buf), 0);
+        case IDC_BUTTON_SEND:
+        {
+            int i = SendDlgItemMessageA(hWnd, IDC_LIST_CLIENTS, LB_GETCURSEL, 0, 0);
+            int a = clients[i];
+
+            char buf[256];
+            GetDlgItemTextA(hWnd, IDC_EDIT_MESSAGE, buf, sizeof(buf));
+
+            char sendbuf[256];
+            sprintf(sendbuf, "%d: %s", a, buf);
+
+            if (sizeof(buf) > 1) {
+                send(client, sendbuf, strlen(sendbuf), 0);
                 send(client, "\n", 1, 0);
-                SetDlgItemTextA(hWnd, IDC_EDIT_MESSAGE, "");
             }
+
+            SetDlgItemTextA(hWnd, IDC_EDIT_MESSAGE, "");
+        }
+        break;
+        case IDM_ABOUT:
+            DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
             break;
-            case IDM_ABOUT:
-                DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
-                break;
-            case IDM_EXIT:
-                DestroyWindow(hWnd);
-                break;
-            default:
-                return DefWindowProc(hWnd, message, wParam, lParam);
-            }
+        case IDM_EXIT:
+            DestroyWindow(hWnd);
+            break;
+        default:
+            return DefWindowProc(hWnd, message, wParam, lParam);
         }
-        break;
+    }
+    break;
     case WM_PAINT:
-        {
-            PAINTSTRUCT ps;
-            HDC hdc = BeginPaint(hWnd, &ps);
-            // TODO: Add any drawing code that uses hdc here...
-            EndPaint(hWnd, &ps);
-        }
-        break;
+    {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hWnd, &ps);
+        // TODO: Add any drawing code that uses hdc here...
+        EndPaint(hWnd, &ps);
+    }
+    break;
     case WM_DESTROY:
         PostQuitMessage(0);
         break;
@@ -243,10 +330,4 @@ INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
         break;
     }
     return (INT_PTR)FALSE;
-}
-
-int startWith(const char* pre, const char* str) {
-    size_t lenpre = strlen(pre),
-        lenstr = strlen(str);
-    return lenstr < lenpre ? false : memcmp(pre, str, lenpre) == 0;
 }
